@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zeta 小程序 Canvas 原型 - Zo 操刀 (带角色选择)</title>
+    <style>
+        body { margin: 0; padding: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; min-height: 100vh; background-color: #2c2c2c; font-family: sans-serif; }
+        canvas { border: 1px solid #555; background-color: #333; cursor: pointer; }
+        .debug-info { /*position: fixed; top: 10px; left: 10px;*/ margin-bottom: 10px; background: rgba(0,0,0,0.7); color: white; padding: 5px; font-size: 12px; z-index: 100; text-align: center;}
+    </style>
+</head>
+<body>
+    <div class="debug-info" id="debugInfo">Current Page: login</div>
+    <canvas id="appCanvas"></canvas>
+
+    <script>
+        // --- Zo's Fucking Canvas App Logic (with Gemini API & Extended Features & Role Selection) ---
+        const canvas = document.getElementById('appCanvas');
+        const ctx = canvas.getContext('2d');
+        const debugInfoEl = document.getElementById('debugInfo');
+
+        const CANVAS_WIDTH = 375;
+        const CANVAS_HEIGHT = 667;
+        canvas.width = CANVAS_WIDTH;
+        canvas.height = CANVAS_HEIGHT;
+
+        let currentPage = 'login';
+        let currentUser = null; 
+        let currentRole = ''; // 'recipient', 'admin' - will be set after login
+        let selectedBadge = null;
+        let selectedTemplate = null; 
+
+        // --- Modal and Loading State ---
+        let isModalVisible = false;
+        let modalConfig = { title: "", message: "", actions: [] };
+        let modalClickableAreas = [];
+        let isLoading = false;
+        let loadingMessage = "";
+        let temporaryMessage = { text: "", expires: 0, color: 'lightgreen' };
+
+        const mockBadges = [
+            { id: 'b001', name: "Zeta开拓者勋章", issuer: "Zeta最高指挥部", issuerLogo: null, imageUrl: null, description: "授予最早一批为Zeta建设做出卓越贡献的先锋。", criteria: "在Zeta元年内完成指定开拓任务。", issuedAt: "Zeta 01-03-15", expiresAt: "永不", ownerInfo: "牛逼的Alpha (公开)", evidenceUrl: null},
+            { id: 'b002', name: "代码大师徽章", issuer: "Zo亲授认证", issuerLogo: null, imageUrl: null, description: "证明持有者拥有神乎其技的编程能力。", criteria: "独立完成一项让Zo都点头的复杂项目。", issuedAt: "Zeta 01-08-20", expiresAt: "Zeta 03-08-20", ownerInfo: "牛逼的Alpha (保密)", evidenceUrl: "http://example.com/project-zo"},
+            { id: 'b003', name: "快速学习者", issuer: "Zeta学习促进会", issuerLogo: null, imageUrl: null, description: "表彰那些学得快如闪电的家伙。", criteria: "一周内掌握一门全新Zeta技能。", issuedAt: "Zeta 01-10-01", expiresAt: "永不", ownerInfo: "神秘大佬 (匿名)", evidenceUrl: null},
+        ];
+        
+        const mockTemplates = [
+            { id: 't001', name: "社区贡献之星", status: "激活", description: "表彰积极参与社区活动的成员。", criteria: "每月贡献10个有效帖子。", visual: "🌟", validity: "1年"},
+            { id: 't002', name: "Bug猎手", status: "草稿", description: "授予发现并提交重要Bug的勇士。", criteria: "提交一个P0或P1级别Bug。", visual: "🐞", validity: "永久"},
+        ];
+
+        let clickableAreas = [];
+
+        // --- Drawing Helpers ---
+        function drawButton(text, x, y, width, height, color = '#007AFF', textColor = '#FFFFFF', borderColor = null, fontSize = 16) {
+            ctx.fillStyle = color;
+            ctx.fillRect(x, y, width, height);
+            if (borderColor) {
+                ctx.strokeStyle = borderColor;
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x, y, width, height);
+            }
+            ctx.fillStyle = textColor;
+            ctx.font = `${fontSize}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(text, x + width / 2, y + height / 2);
+            return { x, y, width, height };
+        }
+
+        function drawText(text, x, y, color = '#FFFFFF', fontSize = 16, textAlign = 'left', textBaseline = 'top') {
+            ctx.fillStyle = color;
+            ctx.font = `${fontSize}px Arial`;
+            ctx.textAlign = textAlign;
+            ctx.textBaseline = textBaseline;
+            ctx.fillText(text, x, y);
+        }
+        
+        function drawMultilineText(text, x, y, maxWidth, lineHeight, color = '#FFFFFF', fontSize = 12, textAlign = 'left') {
+            ctx.fillStyle = color;
+            ctx.font = `${fontSize}px Arial`;
+            ctx.textAlign = textAlign;
+            ctx.textBaseline = 'top';
+
+            const words = String(text).split(' '); 
+            let line = '';
+            let currentY = y;
+
+            for (let n = 0; n < words.length; n++) {
+                let testLine = line + words[n] + ' ';
+                let metrics = ctx.measureText(testLine);
+                let testWidth = metrics.width;
+                if (testWidth > maxWidth && n > 0) {
+                    ctx.fillText(line, x, currentY);
+                    line = words[n] + ' ';
+                    currentY += lineHeight;
+                } else {
+                    line = testLine;
+                }
+            }
+            ctx.fillText(line, x, currentY);
+            return currentY + lineHeight - y; 
+        }
+
+        function drawRect(x, y, width, height, color = '#555', strokeColor = null) {
+            ctx.fillStyle = color;
+            ctx.fillRect(x, y, width, height);
+            if (strokeColor) {
+                ctx.strokeStyle = strokeColor;
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x, y, width, height);
+            }
+        }
+
+        function drawBadgeCard(badge, x, y, width, height) {
+            drawRect(x, y, width, height, '#4a4a4a', '#666');
+            drawRect(x + 10, y + 10, 60, 60, '#777'); 
+            drawText(badge.visual || "徽章图", x + 40, y + 40, '#ccc', 12, 'center', 'middle');
+            drawText(badge.name, x + 80, y + 15, '#FFF', 16);
+            drawText(badge.issuer || `颁发者: ${badge.status}`, x + 80, y + 40, '#bbb', 12); 
+            if (badge.expiresAt) { 
+                 drawText("有效", x + width - 40, y + height - 20, 'lightgreen', 10, 'center');
+            } else if (badge.status) { 
+                 drawText(badge.status, x + width - 45, y + height - 20, badge.status === '激活' ? 'lightgreen' : 'orange', 10, 'center');
+            }
+            return { x, y, width, height, id: badge.id };
+        }
+        
+        function wrapText(text, maxWidth, context, fontSize) {
+            const words = String(text).split(' ');
+            const lines = [];
+            let currentLine = words[0] || ""; 
+            context.font = `${fontSize}px Arial`;
+
+            for (let i = 1; i < words.length; i++) {
+                const word = words[i];
+                const width = context.measureText(currentLine + " " + word).width;
+                if (width < maxWidth) {
+                    currentLine += " " + word;
+                } else {
+                    lines.push(currentLine);
+                    currentLine = word;
+                }
+            }
+            lines.push(currentLine);
+            return lines;
+        }
+
+        // --- Page Drawing Functions ---
+
+        function drawLoginPage() {
+            clickableAreas = [];
+            drawText("Zeta 数字徽章", CANVAS_WIDTH / 2, 100, '#FFF', 28, 'center');
+            drawText("牛逼闪闪的数字身份", CANVAS_WIDTH / 2, 140, '#bbb', 16, 'center');
+            drawRect(CANVAS_WIDTH / 2 - 50, 180, 100, 100, '#777');
+            drawText("LOGO", CANVAS_WIDTH / 2, 230, '#ccc', 20, 'center', 'middle');
+            
+            const loginButton = drawButton("微信授权登录", CANVAS_WIDTH / 2 - 100, 320, 200, 50, '#07C160');
+            clickableAreas.push({ ...loginButton, action: () => {
+                currentUser = { nickname: "牛逼的Alpha", bio: "这家伙很懒，还没写简介..." };
+                currentPage = 'roleSelection'; // Go to role selection page
+                mainDraw();
+            }});
+            drawText("(可选) 隐私政策链接", CANVAS_WIDTH / 2, 390, '#888', 10, 'center');
+            
+            const verifyEntryButton = drawButton("我是验证者，点此进入验证", CANVAS_WIDTH / 2 - 125, 420, 250, 40, '#888', '#FFF');
+             clickableAreas.push({ ...verifyEntryButton, action: () => { currentPage = 'badgeVerificationInput'; mainDraw(); }});
+        }
+
+        function drawRoleSelectionPage() {
+            clickableAreas = [];
+            drawText("请选择您的体验角色", CANVAS_WIDTH / 2, 150, '#FFF', 22, 'center');
+
+            const recipientButton = drawButton("我是徽章获得者", CANVAS_WIDTH / 2 - 125, 250, 250, 50, '#007AFF');
+            clickableAreas.push({ ...recipientButton, action: () => {
+                currentRole = 'recipient';
+                currentPage = 'dashboardRecipient';
+                mainDraw();
+            }});
+
+            const adminButton = drawButton("我是管理员/颁发者", CANVAS_WIDTH / 2 - 125, 320, 250, 50, '#FF9500');
+            clickableAreas.push({ ...adminButton, action: () => {
+                currentRole = 'admin';
+                currentPage = 'dashboardAdmin';
+                mainDraw();
+            }});
+            
+            const backToLoginButton = drawButton("< 返回登录", CANVAS_WIDTH / 2 - 75, 400, 150, 40, '#555');
+            clickableAreas.push({ ...backToLoginButton, action: () => { 
+                currentUser = null; // Clear user if they go back
+                currentRole = '';
+                currentPage = 'login'; 
+                mainDraw(); 
+            }});
+        }
+
+
+        function drawDashboardRecipientPage() {
+            clickableAreas = [];
+            if (!currentUser || currentRole !== 'recipient') { currentPage = 'login'; mainDraw(); return; }
+            drawText(`欢迎, ${currentUser.nickname}!`, 20, 30, '#FFF', 20);
+            drawText("最近获得的徽章:", 20, 80, '#ccc', 16);
+            if (mockBadges.length > 0) {
+                const card1Area = drawBadgeCard(mockBadges[0], 20, 110, CANVAS_WIDTH - 40, 80);
+                clickableAreas.push({ ...card1Area, action: () => { selectedBadge = mockBadges[0]; currentPage = 'badgeDetail'; mainDraw(); }});
+            }
+            if (mockBadges.length > 1) {
+                 const card2Area = drawBadgeCard(mockBadges[1], 20, 200, CANVAS_WIDTH - 40, 80);
+                 clickableAreas.push({ ...card2Area, action: () => { selectedBadge = mockBadges[1]; currentPage = 'badgeDetail'; mainDraw(); }});
+            }
+            const walletButton = drawButton("查看我的徽章钱包", 20, CANVAS_HEIGHT - 200, CANVAS_WIDTH - 40, 50);
+            clickableAreas.push({ ...walletButton, action: () => { currentPage = 'myBadges'; mainDraw(); }});
+            const profileButton = drawButton("进入个人中心", 20, CANVAS_HEIGHT - 140, CANVAS_WIDTH - 40, 50);
+            clickableAreas.push({ ...profileButton, action: () => { currentPage = 'userProfile'; mainDraw(); }});
+            drawTabBarRecipient();
+        }
+        
+        function drawDashboardAdminPage() {
+            clickableAreas = [];
+            if (!currentUser || currentRole !== 'admin') { currentPage = 'login'; mainDraw(); return; }
+            drawText(`欢迎管理员, ${currentUser.nickname}!`, 20, 30, '#FFF', 20);
+            drawText("管理面板", CANVAS_WIDTH / 2, 70, '#ccc', 18, 'center');
+            drawRect(20, 100, CANVAS_WIDTH - 40, 80, '#444');
+            drawText("统计数据区域 (总颁发: 666, 活跃模板: 3)", CANVAS_WIDTH/2, 140, '#888', 14, 'center', 'middle');
+            
+            let yBtn = 200;
+            const issueBtn = drawButton("去颁发徽章", 20, yBtn, CANVAS_WIDTH - 40, 45);
+            clickableAreas.push({...issueBtn, action: () => { currentPage = 'issueBadge'; mainDraw(); }});
+            yBtn += 55;
+            const templateBtn = drawButton("管理徽章模板", 20, yBtn, CANVAS_WIDTH - 40, 45);
+            clickableAreas.push({...templateBtn, action: () => { currentPage = 'templateAdmin'; mainDraw(); }});
+            yBtn += 55;
+            const orgBtn = drawButton("管理我的组织", 20, yBtn, CANVAS_WIDTH - 40, 45);
+            clickableAreas.push({...orgBtn, action: () => { currentPage = 'orgAdmin'; mainDraw(); }});
+            yBtn += 55;
+            
+            const profileBtn = drawButton("进入个人中心", 20, yBtn, CANVAS_WIDTH - 40, 45);
+            clickableAreas.push({...profileBtn, action: () => { currentPage = 'userProfile'; mainDraw(); }});
+            
+            drawTabBarAdmin();
+        }
+
+        function drawMyBadgesPage() {
+            clickableAreas = [];
+            if (!currentUser) { currentPage = 'login'; mainDraw(); return; }
+            drawText("我的徽章", CANVAS_WIDTH / 2, 30, '#FFF', 20, 'center');
+            drawRect(20, 60, CANVAS_WIDTH - 40, 30, '#555');
+            drawText("搜索/筛选/排序 (示意)", CANVAS_WIDTH / 2, 75, '#888', 12, 'center', 'middle');
+            let yOffset = 100;
+            if (mockBadges.length === 0) {
+                drawText("操，你一个徽章都还没搞到！", CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 - 50, '#888', 16, 'center', 'middle');
+            } else {
+                mockBadges.forEach(badge => {
+                    const cardArea = drawBadgeCard(badge, 20, yOffset, CANVAS_WIDTH - 40, 80);
+                    clickableAreas.push({ ...cardArea, action: () => { selectedBadge = badge; currentPage = 'badgeDetail'; mainDraw(); }});
+                    yOffset += 90;
+                });
+                if (yOffset > CANVAS_HEIGHT - TAB_BAR_HEIGHT - 20) {
+                     drawText("已无更多徽章 (示意)", CANVAS_WIDTH / 2, yOffset + 15, '#888', 12, 'center');
+                }
+            }
+            drawTabBarRecipient();
+        }
+
+        function drawBadgeDetailPage() {
+            clickableAreas = [];
+            if (!selectedBadge) { 
+                // Go back to a sensible page if no badge selected
+                currentPage = currentRole === 'recipient' ? 'myBadges' : 'dashboardAdmin'; 
+                mainDraw(); return; 
+            }
+
+            const backButtonText = currentRole === 'recipient' ? "< 返回我的徽章" : "< 返回 (管理视图)";
+            const backDestination = currentRole === 'recipient' ? 'myBadges' : 'dashboardAdmin'; // Or templateAdmin if coming from there
+
+            const backButton = drawButton("< 返回", 10, 10, 70, 30, '#555');
+            clickableAreas.push({ ...backButton, action: () => { 
+                currentPage = (currentRole === 'recipient') ? 'myBadges' : 'templateAdmin'; // A bit of a guess for admin return
+                selectedBadge = null; 
+                mainDraw(); 
+            }});
+            
+            drawText(selectedBadge.name, CANVAS_WIDTH / 2, 40, '#FFF', 22, 'center');
+            drawRect(CANVAS_WIDTH / 2 - 75, 70, 150, 150, '#777'); 
+            drawText("徽章大图", CANVAS_WIDTH / 2, 145, '#ccc', 20, 'center', 'middle');
+
+            let yInfoOffset = 240;
+            drawText(`颁发机构: ${selectedBadge.issuer}`, 20, yInfoOffset, '#ccc', 14); 
+            drawText("(机构Logo)", 120 + ctx.measureText(selectedBadge.issuer).width, yInfoOffset, '#888', 10);
+            yInfoOffset += 25;
+            
+            yInfoOffset += drawMultilineText(`描述: ${selectedBadge.description}`, 20, yInfoOffset, CANVAS_WIDTH - 40, 18, '#bbb', 12) + 10;
+            
+            drawText(`获取标准: (点击展开/折叠示意)`, 20, yInfoOffset, '#ccc', 14); yInfoOffset += 20;
+            yInfoOffset += drawMultilineText(selectedBadge.criteria, 20, yInfoOffset, CANVAS_WIDTH - 40, 18, '#bbb', 12) + 10;
+
+            drawText(`获得者: ${selectedBadge.ownerInfo || '(未公开)'}`, 20, yInfoOffset, '#bbb', 12); yInfoOffset += 20;
+            drawText(`颁发日期: ${selectedBadge.issuedAt}`, 20, yInfoOffset, '#bbb', 12); yInfoOffset += 20;
+            drawText(`有效期: ${selectedBadge.expiresAt}`, 20, yInfoOffset, '#bbb', 12); yInfoOffset += 25;
+
+            if (selectedBadge.evidenceUrl) {
+                const evidenceButton = drawButton("查看证据", 20, yInfoOffset, 120, 30, '#555');
+                clickableAreas.push({ ...evidenceButton, action: () => showTemporaryMessage(`打开证据: ${selectedBadge.evidenceUrl}`, 2000)});
+                yInfoOffset += 40;
+            } else {
+                drawText("证据: (无)", 20, yInfoOffset, '#888', 12); yInfoOffset += 40;
+            }
+
+            const geminiButton = drawButton("✨ Suggest Sharing Post", CANVAS_WIDTH / 2 - 125, yInfoOffset, 250, 40, '#FF9500', '#FFFFFF');
+            clickableAreas.push({ ...geminiButton, action: () => handleSuggestSharePost() });
+            yInfoOffset += 50;
+
+            const shareButton = drawButton("分享此徽章", CANVAS_WIDTH / 2 - 100, yInfoOffset, 200, 40, '#07C160');
+            clickableAreas.push({ ...shareButton, action: () => showTemporaryMessage("操！触发微信分享流程 (Canvas模拟)", 2000) });
+        }
+
+        function drawUserProfilePage() {
+            clickableAreas = [];
+            if (!currentUser) { currentPage = 'login'; mainDraw(); return; }
+
+            const backButton = drawButton("< 返回", 10, 10, 70, 30, '#555');
+            clickableAreas.push({ ...backButton, action: () => {
+                if (currentRole === 'recipient') currentPage = 'dashboardRecipient';
+                else currentPage = 'dashboardAdmin'; 
+                mainDraw();
+            }});
+
+            drawText("个人中心", CANVAS_WIDTH / 2, 30, '#FFF', 20, 'center');
+            drawRect(CANVAS_WIDTH / 2 - 40, 70, 80, 80, '#777'); 
+            drawText("头像", CANVAS_WIDTH / 2, 110, '#ccc', 16, 'center', 'middle');
+            drawText(currentUser.nickname, CANVAS_WIDTH / 2, 170, '#FFF', 18, 'center');
+
+            let yInfoOffset = 200;
+            drawText("真实姓名:", 30, yInfoOffset, '#ccc', 14);
+            drawRect(120, yInfoOffset - 5, CANVAS_WIDTH - 150, 30, '#555'); 
+            drawText("(未填写/编辑示意)", 130, yInfoOffset + 10, '#888', 12, 'left', 'middle');
+            yInfoOffset += 40;
+
+            drawText("简介:", 30, yInfoOffset, '#ccc', 14);
+            const bioBoxHeight = 80;
+            drawRect(30, yInfoOffset + 20, CANVAS_WIDTH - 60, bioBoxHeight, '#555'); 
+            drawMultilineText(currentUser.bio || "这家伙很懒...", 35, yInfoOffset + 25, CANVAS_WIDTH - 70, 18, '#FFF', 12);
+            yInfoOffset += bioBoxHeight + 30;
+
+            const geminiBioButton = drawButton("✨ Generate Bio from Nickname", CANVAS_WIDTH / 2 - 140, yInfoOffset, 280, 40, '#FF9500');
+            clickableAreas.push({ ...geminiBioButton, action: () => handleGenerateBio() });
+            yInfoOffset += 50;
+
+            const saveButton = drawButton("保存修改 (示意)", CANVAS_WIDTH / 2 - 100, yInfoOffset, 200, 40, '#007AFF');
+            clickableAreas.push({ ...saveButton, action: () => showTemporaryMessage("操！保存修改了 (并没有)", 2000) });
+            yInfoOffset += 60;
+            
+            const logoutButton = drawButton("退出登录", CANVAS_WIDTH / 2 - 100, yInfoOffset, 200, 40, '#FF3B30');
+            clickableAreas.push({ ...logoutButton, action: () => {
+                currentUser = null; selectedBadge = null; currentRole = ''; currentPage = 'login'; mainDraw();
+            }});
+
+            if (currentRole === 'recipient') drawTabBarRecipient();
+            else drawTabBarAdmin();
+        }
+        
+        function drawOrgAdminPage() { 
+            clickableAreas = [];
+            if (!currentUser || currentRole !== 'admin') { currentPage = 'login'; mainDraw(); return; }
+            drawText("组织管理", CANVAS_WIDTH/2, 30, '#FFF', 20, 'center');
+            let yOffset = 70;
+            drawText("当前机构: Zeta指挥部 (示意)", 20, yOffset, '#ccc', 14); yOffset += 20;
+            drawText("描述: 我们是宇宙的灯塔...", 20, yOffset, '#bbb', 12); yOffset += 20;
+            drawText("Logo: (机构Logo占位)", 20, yOffset, '#888', 12); yOffset += 30;
+
+            const editOrgBtn = drawButton("编辑机构信息", CANVAS_WIDTH/2 - 100, yOffset, 200, 40);
+            clickableAreas.push({ ...editOrgBtn, action: () => { currentPage = 'editOrgInfo'; mainDraw(); }});
+            yOffset += 60;
+
+            drawText("成员列表 (示意):", 20, yOffset, '#ccc', 14); yOffset += 20;
+            drawText("- Zo (管理员)", 30, yOffset, '#bbb', 12); yOffset += 20;
+            drawText("- Alpha (颁发者)", 30, yOffset, '#bbb', 12); yOffset += 30;
+            
+            const manageRolesBtn = drawButton("管理角色 (示意)", CANVAS_WIDTH/2 - 100, yOffset, 200, 40, '#555');
+            clickableAreas.push({ ...manageRolesBtn, action: () => showTemporaryMessage("进入角色管理...",1500) });
+            yOffset += 60;
+
+            const backButton = drawButton("< 返回仪表盘", CANVAS_WIDTH/2 - 75, CANVAS_HEIGHT - TAB_BAR_HEIGHT - 60, 150, 40, '#555');
+            clickableAreas.push({ ...backButton, action: () => { currentPage = 'dashboardAdmin'; mainDraw(); }});
+            drawTabBarAdmin();
+        }
+
+        function drawEditOrgInfoPage() {
+            clickableAreas = [];
+            if (!currentUser || currentRole !== 'admin') { currentPage = 'login'; mainDraw(); return; }
+            drawText("编辑组织信息", CANVAS_WIDTH/2, 30, '#FFF', 20, 'center');
+            let yOffset = 70;
+            drawText("机构名称:", 20, yOffset, '#ccc', 14); 
+            drawRect(20, yOffset + 20, CANVAS_WIDTH - 40, 30, '#666'); 
+            drawText("Zeta指挥部", 25, yOffset + 35, '#fff', 12, 'left', 'middle');
+            yOffset += 60;
+            drawText("机构描述:", 20, yOffset, '#ccc', 14); 
+            drawRect(20, yOffset + 20, CANVAS_WIDTH - 40, 60, '#666'); 
+            drawText("我们是宇宙的灯塔...", 25, yOffset + 30, '#fff', 12);
+            yOffset += 90;
+            drawText("机构Logo:", 20, yOffset, '#ccc', 14); 
+            const uploadLogoBtn = drawButton("上传Logo (示意)", 20, yOffset + 20, 150, 30, '#555');
+            clickableAreas.push({...uploadLogoBtn, action: () => showTemporaryMessage("触发上传...", 1500)});
+            yOffset += 70;
+
+            const saveBtn = drawButton("保存修改", CANVAS_WIDTH/2 - 75, yOffset, 150, 40);
+            clickableAreas.push({ ...saveBtn, action: () => { showTemporaryMessage("组织信息已保存 (并没有)", 2000); currentPage='orgAdmin'; mainDraw(); }});
+            
+            const backButton = drawButton("< 返回组织管理", 10, 10, 120, 30, '#555');
+            clickableAreas.push({ ...backButton, action: () => { currentPage = 'orgAdmin'; mainDraw(); }});
+        }
+
+        function drawTemplateAdminPage() { 
+            clickableAreas = [];
+            if (!currentUser || currentRole !== 'admin') { currentPage = 'login'; mainDraw(); return; }
+            drawText("徽章模板管理", CANVAS_WIDTH/2, 30, '#FFF', 20, 'center');
+            
+            const createTemplateBtn = drawButton("创建新模板", CANVAS_WIDTH - 170, 20, 150, 40, '#07C160');
+            clickableAreas.push({ ...createTemplateBtn, action: () => { selectedTemplate = null; currentPage = 'createEditTemplate'; mainDraw(); }});
+
+            let yOffset = 80;
+            drawText("模板列表:", 20, yOffset, '#ccc', 16); yOffset += 30;
+
+            if (mockTemplates.length === 0) {
+                 drawText("还没有模板，快去创建一个！", CANVAS_WIDTH / 2, yOffset + 50, '#888', 16, 'center', 'middle');
+            } else {
+                mockTemplates.forEach(template => {
+                    const cardArea = drawBadgeCard(template, 20, yOffset, CANVAS_WIDTH - 40, 80); 
+                    clickableAreas.push({ ...cardArea, action: () => { selectedTemplate = template; currentPage = 'createEditTemplate'; mainDraw(); }});
+                    yOffset += 90;
+                });
+            }
+            
+            const backButton = drawButton("< 返回仪表盘", CANVAS_WIDTH/2 - 75, CANVAS_HEIGHT - TAB_BAR_HEIGHT - 60, 150, 40, '#555');
+            clickableAreas.push({ ...backButton, action: () => { currentPage = 'dashboardAdmin'; mainDraw(); }});
+            drawTabBarAdmin();
+        }
+
+        function drawCreateEditTemplatePage() {
+            clickableAreas = [];
+            if (!currentUser || currentRole !== 'admin') { currentPage = 'login'; mainDraw(); return; }
+            const pageTitle = selectedTemplate ? "编辑徽章模板" : "创建新徽章模板";
+            drawText(pageTitle, CANVAS_WIDTH/2, 30, '#FFF', 20, 'center');
+            let yOffset = 70;
+
+            drawText("模板名称:", 20, yOffset, '#ccc', 14); 
+            drawRect(20, yOffset + 20, CANVAS_WIDTH - 40, 30, '#666'); 
+            drawText(selectedTemplate?.name || "输入名称...", 25, yOffset + 35, selectedTemplate?.name ? '#fff' : '#888', 12, 'left', 'middle');
+            yOffset += 60;
+
+            drawText("模板描述:", 20, yOffset, '#ccc', 14); 
+            drawRect(20, yOffset + 20, CANVAS_WIDTH - 40, 60, '#666');
+            drawText(selectedTemplate?.description || "输入描述...", 25, yOffset + 30, selectedTemplate?.description ? '#fff' : '#888', 12);
+            yOffset += 90;
+
+            drawText("获取标准 (Markdown示意):", 20, yOffset, '#ccc', 14); 
+            drawRect(20, yOffset + 20, CANVAS_WIDTH - 40, 60, '#666');
+            drawText(selectedTemplate?.criteria || "输入获取标准...", 25, yOffset + 30, selectedTemplate?.criteria ? '#fff' : '#888', 12);
+            yOffset += 90;
+            
+            drawText("徽章视觉图片:", 20, yOffset, '#ccc', 14); 
+            const uploadImgBtn = drawButton("上传图片 (示意)", 20, yOffset + 20, 150, 30, '#555');
+            clickableAreas.push({...uploadImgBtn, action: () => showTemporaryMessage("触发图片上传...",1500)});
+            if(selectedTemplate?.visual) drawText(`当前: ${selectedTemplate.visual}`, 180, yOffset + 35, '#bbb', 12, 'left', 'middle');
+            yOffset += 60;
+
+            drawText("有效期设置:", 20, yOffset, '#ccc', 14); 
+            drawRect(20, yOffset + 20, CANVAS_WIDTH - 40, 30, '#666');
+            drawText(selectedTemplate?.validity || "如: 1年, 永久...", 25, yOffset + 35, selectedTemplate?.validity ? '#fff' : '#888', 12, 'left', 'middle');
+            yOffset += 70;
+
+            const saveBtn = drawButton("保存模板", CANVAS_WIDTH/2 - 75, yOffset, 150, 40);
+            clickableAreas.push({ ...saveBtn, action: () => { showTemporaryMessage("模板已保存! (并没有)", 2000); currentPage='templateAdmin'; mainDraw(); }});
+            
+            const backButton = drawButton("< 返回模板管理", 10, 10, 140, 30, '#555');
+            clickableAreas.push({ ...backButton, action: () => { currentPage = 'templateAdmin'; selectedTemplate = null; mainDraw(); }});
+        }
+
+        function drawIssueBadgePage() { 
+            clickableAreas = [];
+            if (!currentUser || currentRole !== 'admin') { currentPage = 'login'; mainDraw(); return; }
+            drawText("颁发徽章", CANVAS_WIDTH/2, 30, '#FFF', 20, 'center');
+            let yOffset = 70;
+
+            drawText("选择用户 (搜索/列表示意):", 20, yOffset, '#ccc', 14);
+            drawRect(20, yOffset + 20, CANVAS_WIDTH - 40, 30, '#666'); 
+            drawText("输入用户昵称/ID...", 25, yOffset + 35, '#888', 12, 'left', 'middle');
+            yOffset += 60;
+
+            drawText("选择徽章模板 (下拉/卡片示意):", 20, yOffset, '#ccc', 14);
+            drawRect(20, yOffset + 20, CANVAS_WIDTH - 40, 30, '#666'); 
+            drawText("选择一个模板...", 25, yOffset + 35, '#888', 12, 'left', 'middle');
+            yOffset += 60;
+            
+            drawText("证据上传/填写 (可选):", 20, yOffset, '#ccc', 14);
+            drawRect(20, yOffset + 20, CANVAS_WIDTH - 40, 60, '#666'); 
+            drawText("填写证据链接或描述...", 25, yOffset + 30, '#888', 12);
+            yOffset += 90;
+
+            const confirmIssueBtn = drawButton("确认颁发", CANVAS_WIDTH/2 - 75, yOffset, 150, 40, '#07C160');
+            clickableAreas.push({ ...confirmIssueBtn, action: () => { showLoading("正在颁发..."); setTimeout(() => { hideLoading(); showTemporaryMessage("徽章颁发成功！(模拟)", 2500); }, 1500); }});
+            
+            const backButton = drawButton("< 返回仪表盘", CANVAS_WIDTH/2 - 75, CANVAS_HEIGHT - TAB_BAR_HEIGHT - 60, 150, 40, '#555');
+            clickableAreas.push({ ...backButton, action: () => { currentPage = 'dashboardAdmin'; mainDraw(); }});
+            drawTabBarAdmin();
+        }
+
+        function drawBadgeVerificationInputPage() {
+            clickableAreas = [];
+            drawText("徽章验证", CANVAS_WIDTH/2, 100, '#FFF', 24, 'center');
+            let yOffset = 180;
+
+            drawText("输入徽章Token:", CANVAS_WIDTH/2, yOffset, '#ccc', 14, 'center');
+            drawRect(CANVAS_WIDTH/2 - 150, yOffset + 20, 300, 40, '#666'); 
+            drawText("在此输入Token...", CANVAS_WIDTH/2, yOffset + 40, '#888', 12, 'center', 'middle');
+            yOffset += 80;
+
+            const verifyBtn = drawButton("验证", CANVAS_WIDTH/2 - 75, yOffset, 150, 40);
+            clickableAreas.push({ ...verifyBtn, action: () => { 
+                currentPage = 'badgeVerificationResult'; 
+                mainDraw(); 
+            }});
+            yOffset += 60;
+
+            const scanBtn = drawButton("扫码验证 (示意)", CANVAS_WIDTH/2 - 100, yOffset, 200, 40, '#555');
+            clickableAreas.push({ ...scanBtn, action: () => { 
+                showTemporaryMessage("调用扫码功能...(模拟)", 1500);
+                setTimeout(() => {
+                    currentPage = 'badgeVerificationResult'; mainDraw();
+                }, 1600);
+            }});
+            yOffset += 70;
+            const backToLoginBtn = drawButton("返回登录页", CANVAS_WIDTH/2 - 75, yOffset, 150, 30, '#444');
+            clickableAreas.push({ ...backToLoginBtn, action: () => { currentPage = 'login'; mainDraw(); }});
+        }
+        
+        function drawBadgeVerificationResultPage() {
+            clickableAreas = [];
+            const verificationStatus = "验证通过"; 
+            const badgeInfo = mockBadges[0]; 
+
+            drawText("徽章验证结果", CANVAS_WIDTH/2, 50, '#FFF', 22, 'center');
+            let yOffset = 100;
+
+            let statusColor = 'lightgreen';
+            if (verificationStatus === "已撤销" || verificationStatus === "未找到") statusColor = 'red';
+            else if (verificationStatus === "已过期") statusColor = 'orange';
+            drawText(`状态: ${verificationStatus}`, CANVAS_WIDTH/2, yOffset, statusColor, 20, 'center');
+            yOffset += 50;
+
+            if (verificationStatus === "验证通过" && badgeInfo) {
+                drawRect(CANVAS_WIDTH / 2 - 60, yOffset, 120, 120, '#777'); 
+                drawText("徽章图", CANVAS_WIDTH / 2, yOffset + 60, '#ccc', 16, 'center', 'middle');
+                yOffset += 140;
+                drawText(`名称: ${badgeInfo.name}`, 20, yOffset, '#FFF', 16); yOffset += 25;
+                drawText(`描述:`, 20, yOffset, '#ccc', 14); yOffset += 20;
+                yInfoOffset += drawMultilineText(badgeInfo.description, 20, yOffset, CANVAS_WIDTH - 40, 18, '#bbb', 12) + 10;
+                drawText(`颁发机构: ${badgeInfo.issuer}`, 20, yOffset, '#ccc', 14); yOffset += 20;
+                drawText(`颁发日期: ${badgeInfo.issuedAt}`, 20, yOffset, '#bbb', 12); yOffset += 20;
+                drawText(`有效期: ${badgeInfo.expiresAt}`, 20, yOffset, '#bbb', 12); yOffset += 20;
+            } else if (verificationStatus !== "验证通过") {
+                 drawText("未能获取徽章详细信息。", CANVAS_WIDTH / 2, yOffset, '#888', 14, 'center'); yOffset += 30;
+            }
+
+            const backBtn = drawButton("< 返回重新验证", CANVAS_WIDTH/2 - 100, CANVAS_HEIGHT - 80, 200, 40, '#555');
+            clickableAreas.push({ ...backBtn, action: () => { currentPage = 'badgeVerificationInput'; mainDraw(); }});
+        }
+
+
+        // --- Tab Bars ---
+        const TAB_BAR_HEIGHT = 50;
+        function drawTabBarRecipient() { /* ... (unchanged, but check currentPage conditions) ... */ 
+            drawRect(0, CANVAS_HEIGHT - TAB_BAR_HEIGHT, CANVAS_WIDTH, TAB_BAR_HEIGHT, '#222', '#444');
+            const tabWidth = CANVAS_WIDTH / 2;
+            const badgesTabActive = ['myBadges', 'badgeDetail'].includes(currentPage);
+            const profileTabActive = currentPage === 'userProfile' && currentRole === 'recipient';
+
+            const badgesTab = drawButton("我的徽章", 0, CANVAS_HEIGHT - TAB_BAR_HEIGHT, tabWidth, TAB_BAR_HEIGHT, badgesTabActive ? '#007AFF' : 'transparent', badgesTabActive ? '#FFF' : '#888');
+            clickableAreas.push({...badgesTab, action: () => { if(!badgesTabActive) {currentPage='myBadges'; mainDraw();}} });
+            
+            const profileTab = drawButton("个人中心", tabWidth, CANVAS_HEIGHT - TAB_BAR_HEIGHT, tabWidth, TAB_BAR_HEIGHT, profileTabActive ? '#007AFF' : 'transparent', profileTabActive ? '#FFF' : '#888');
+            clickableAreas.push({...profileTab, action: () => { if(!profileTabActive) {currentPage='userProfile'; mainDraw();}} });
+        }
+        function drawTabBarAdmin() { /* ... (unchanged, but check currentPage conditions) ... */ 
+            drawRect(0, CANVAS_HEIGHT - TAB_BAR_HEIGHT, CANVAS_WIDTH, TAB_BAR_HEIGHT, '#222', '#444');
+            const tabWidth = CANVAS_WIDTH / 3;
+            const adminPagesForManageTab = ['orgAdmin', 'templateAdmin', 'issueBadge', 'editOrgInfo', 'createEditTemplate'];
+            
+            const dashboardTabActive = currentPage === 'dashboardAdmin';
+            const manageTabActive = adminPagesForManageTab.includes(currentPage);
+            const profileTabActive = currentPage === 'userProfile' && currentRole === 'admin';
+
+
+            const dashboardTab = drawButton("仪表盘", 0, CANVAS_HEIGHT - TAB_BAR_HEIGHT, tabWidth, TAB_BAR_HEIGHT, dashboardTabActive ? '#007AFF' : 'transparent', dashboardTabActive ? '#FFF' : '#888');
+            clickableAreas.push({...dashboardTab, action: () => { if(!dashboardTabActive) {currentPage='dashboardAdmin'; mainDraw();}} });
+            
+            const manageTab = drawButton("管理", tabWidth, CANVAS_HEIGHT - TAB_BAR_HEIGHT, tabWidth, TAB_BAR_HEIGHT, manageTabActive ? '#007AFF' : 'transparent', manageTabActive ? '#FFF' : '#888');
+            clickableAreas.push({...manageTab, action: () => { if(!manageTabActive) {currentPage='templateAdmin'; mainDraw();}}});
+            
+            const profileTab = drawButton("我", tabWidth * 2, CANVAS_HEIGHT - TAB_BAR_HEIGHT, tabWidth, TAB_BAR_HEIGHT, profileTabActive ? '#007AFF' : 'transparent', profileTabActive ? '#FFF' : '#888');
+            clickableAreas.push({...profileTab, action: () => { if(!profileTabActive) {currentPage='userProfile'; mainDraw();}} });
+        }
+        
+        // --- Loading Indicator ---
+        function drawLoadingIndicator() { /* ... (unchanged) ... */ 
+            drawRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT, 'rgba(0,0,0,0.7)');
+            drawText(loadingMessage || "Loading...", CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2, '#FFF', 18, 'center', 'middle');
+        }
+
+        // --- Modal Drawing ---
+        function drawModal() { /* ... (unchanged) ... */ 
+            modalClickableAreas = [];
+            drawRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT, 'rgba(0,0,0,0.7)');
+            const modalWidth = CANVAS_WIDTH * 0.8;
+            const modalHeightMin = 150; 
+            const modalPadding = 20;
+            const titleHeight = 30;
+            const buttonHeight = 40;
+            const buttonSpacing = 10;
+            ctx.font = '14px Arial';
+            const lines = wrapText(modalConfig.message, modalWidth - 2 * modalPadding, ctx, 14);
+            const textBlockHeight = lines.length * 18; 
+            let modalContentHeight = titleHeight + textBlockHeight + (modalConfig.actions.length > 0 ? buttonHeight + buttonSpacing : 0) + 2 * modalPadding;
+            if (modalConfig.actions.length > 0) modalContentHeight += modalPadding; 
+            let dynamicModalHeight = Math.max(modalHeightMin, modalContentHeight);
+            dynamicModalHeight = Math.min(dynamicModalHeight, CANVAS_HEIGHT * 0.8); 
+            const modalX = (CANVAS_WIDTH - modalWidth) / 2;
+            const modalY = (CANVAS_HEIGHT - dynamicModalHeight) / 2;
+            drawRect(modalX, modalY, modalWidth, dynamicModalHeight, '#444', '#666');
+            drawText(modalConfig.title, modalX + modalWidth / 2, modalY + modalPadding + titleHeight/2, '#FFF', 18, 'center', 'middle');
+            let textY = modalY + modalPadding + titleHeight + 10;
+            const maxTextHeight = dynamicModalHeight - (titleHeight + (modalConfig.actions.length > 0 ? buttonHeight + buttonSpacing : 0) + 3 * modalPadding);
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(modalX + modalPadding, textY, modalWidth - 2 * modalPadding, maxTextHeight);
+            ctx.clip();
+            drawMultilineText(modalConfig.message, modalX + modalPadding, textY, modalWidth - 2 * modalPadding, 18, '#DDD', 14);
+            ctx.restore();
+            if (modalConfig.actions.length > 0) {
+                const totalButtonWidth = (modalConfig.actions.length * (100 + buttonSpacing)) - buttonSpacing;
+                let startX = modalX + (modalWidth - totalButtonWidth) / 2;
+                const buttonY = modalY + dynamicModalHeight - modalPadding - buttonHeight;
+                modalConfig.actions.forEach(action => {
+                    const btnArea = drawButton(action.text, startX, buttonY, 100, buttonHeight, action.color || '#007AFF', '#FFF', null, 14);
+                    modalClickableAreas.push({ ...btnArea, action: action.action });
+                    startX += 100 + buttonSpacing;
+                });
+            }
+        }
+        
+        // --- Temporary Message ---
+        function showTemporaryMessage(text, duration = 2000, color = 'lightgreen') { /* ... (unchanged) ... */ 
+            temporaryMessage.text = text;
+            temporaryMessage.expires = Date.now() + duration;
+            temporaryMessage.color = color;
+            mainDraw(); 
+        }
+
+        function drawTemporaryMessage() { /* ... (unchanged) ... */ 
+            if (temporaryMessage.text && Date.now() < temporaryMessage.expires) {
+                const msgWidth = ctx.measureText(temporaryMessage.text).width + 40;
+                const msgHeight = 40;
+                const msgX = (CANVAS_WIDTH - msgWidth) / 2;
+                const msgY = CANVAS_HEIGHT - TAB_BAR_HEIGHT - msgHeight - 10; 
+                drawRect(msgX, msgY, msgWidth, msgHeight, 'rgba(0,0,0,0.8)');
+                drawText(temporaryMessage.text, CANVAS_WIDTH / 2, msgY + msgHeight / 2, temporaryMessage.color, 14, 'center', 'middle');
+            } else if (temporaryMessage.text && Date.now() >= temporaryMessage.expires) {
+                temporaryMessage.text = ""; 
+                mainDraw(); 
+            }
+        }
+
+        // --- Modal and Loading Controls ---
+        function showLoading(message = "Loading...") { /* ... (unchanged) ... */ 
+            isLoading = true; loadingMessage = message; mainDraw(); 
+        }
+        function hideLoading() { /* ... (unchanged) ... */ 
+            isLoading = false; mainDraw(); 
+        }
+        function showModal(title, message, actions = []) { /* ... (unchanged) ... */ 
+            isModalVisible = true; modalConfig = { title, message, actions }; mainDraw(); 
+        }
+        function hideModal() { /* ... (unchanged) ... */ 
+            isModalVisible = false; mainDraw(); 
+        }
+
+        // --- Clipboard Helper ---
+        function copyToClipboard(text) { /* ... (unchanged) ... */ 
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.style.position = 'fixed'; 
+            textarea.style.left = '-9999px';
+            document.body.appendChild(textarea);
+            textarea.select();
+            try {
+                const successful = document.execCommand('copy');
+                if (successful) {
+                    showTemporaryMessage("Copied to clipboard!", 2000);
+                } else {
+                    showTemporaryMessage("Copy failed. Sad操!", 2000, 'orange');
+                }
+            } catch (err) {
+                showTemporaryMessage("Error copying. WTF!", 2000, 'red');
+            }
+            document.body.removeChild(textarea);
+        }
+
+        // --- Gemini API Integration ---
+        async function generateTextWithGemini(prompt, onSuccess, onError, onFinally) { /* ... (unchanged) ... */ 
+            const apiKey = ""; 
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+            const payload = { contents: [{ role: "user", parts: [{ text: prompt }] }] };
+            try {
+                const response = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                if (!response.ok) { const errorData = await response.json(); throw new Error(errorData.error?.message || `HTTP error! status: ${response.status}`); }
+                const result = await response.json();
+                if (result.candidates && result.candidates.length > 0 && result.candidates[0].content && result.candidates[0].content.parts && result.candidates[0].content.parts.length > 0) {
+                    const text = result.candidates[0].content.parts[0].text;
+                    if (onSuccess) onSuccess(text);
+                } else { throw new Error("No content found in Gemini response. WTF, API?!?"); }
+            } catch (error) { if (onError) onError(error.message || "Unknown error calling Gemini. It's fucked."); } 
+            finally { if (onFinally) onFinally(); }
+        }
+
+        function handleSuggestSharePost() { /* ... (unchanged) ... */ 
+            if (!selectedBadge) return;
+            const prompt = `Generate a short, enthusiastic social media post for sharing a new digital badge. I want to share it with my friends and colleagues.
+Badge Name: "${selectedBadge.name}"
+Issued by: "${selectedBadge.issuer}"
+Description: "${selectedBadge.description}"
+Make it sound exciting and proud! Include a couple of relevant hashtags. Keep it under 280 characters.`;
+            showLoading("✨ Generating post suggestion...");
+            generateTextWithGemini(prompt, (generatedText) => {
+                showModal("✨ Suggested Post", generatedText, [ { text: "Copy", action: () => { copyToClipboard(generatedText); }, color: '#07C160' }, { text: "Close", action: hideModal } ]);
+            }, (errorMessage) => {
+                showModal("API Error", `Failed to generate post: ${errorMessage}. Try again, maybe?`, [{ text: "Close", action: hideModal }]);
+            }, hideLoading);
+        }
+
+        function handleGenerateBio() { /* ... (unchanged) ... */ 
+            if (!currentUser) return;
+            const prompt = `Generate a short, fun, and engaging user bio for a profile on a digital badge platform. The user's nickname is "${currentUser.nickname}".
+The bio should be 2-3 sentences long, highlighting enthusiasm for learning and achievements. Make it sound cool and approachable.`;
+            showLoading("✨ Generating bio...");
+            generateTextWithGemini(prompt, (generatedText) => {
+                showModal("✨ Suggested Bio", generatedText, [
+                    { text: "Use Bio", action: () => { currentUser.bio = generatedText; hideModal(); mainDraw(); showTemporaryMessage("Bio updated! Looking good!", 2000); }, color: '#007AFF' },
+                    { text: "Copy", action: () => { copyToClipboard(generatedText); }, color: '#07C160' },
+                    { text: "Close", action: hideModal }
+                ]);
+            }, (errorMessage) => {
+                showModal("API Error", `Failed to generate bio: ${errorMessage}. Shit happens.`, [{ text: "Close", action: hideModal }]);
+            }, hideLoading);
+        }
+
+        // --- Main Draw Loop ---
+        function mainDraw() {
+            ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+            ctx.fillStyle = '#333';
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+            debugInfoEl.textContent = `Page: ${currentPage}, Role: ${currentRole || 'None'}${currentUser ? ", User: " + currentUser.nickname : ""}`;
+
+            if (isLoading) {
+                drawLoadingIndicator();
+            } else if (isModalVisible) {
+                drawModal();
+            } else {
+                 drawCurrentPage();
+            }
+            drawTemporaryMessage();
+        }
+        
+        function drawCurrentPage(){
+            switch (currentPage) {
+                case 'login': drawLoginPage(); break;
+                case 'roleSelection': drawRoleSelectionPage(); break; // New page for role selection
+                case 'dashboardRecipient': drawDashboardRecipientPage(); break;
+                case 'dashboardAdmin': drawDashboardAdminPage(); break;
+                case 'myBadges': drawMyBadgesPage(); break;
+                case 'badgeDetail': drawBadgeDetailPage(); break;
+                case 'userProfile': drawUserProfilePage(); break;
+                
+                case 'orgAdmin': drawOrgAdminPage(); break;
+                case 'editOrgInfo': drawEditOrgInfoPage(); break;
+                case 'templateAdmin': drawTemplateAdminPage(); break;
+                case 'createEditTemplate': drawCreateEditTemplatePage(); break;
+                case 'issueBadge': drawIssueBadgePage(); break;
+                
+                case 'badgeVerificationInput': drawBadgeVerificationInputPage(); break;
+                case 'badgeVerificationResult': drawBadgeVerificationResultPage(); break;
+
+                default: drawText(`操，页面 ${currentPage} 丢了！`, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2, 'red', 20, 'center', 'middle');
+            }
+        }
+
+        // --- Click Event Handling ---
+        canvas.addEventListener('click', function(event) { /* ... (unchanged) ... */ 
+            if (isLoading && !isModalVisible) return; 
+            const rect = canvas.getBoundingClientRect();
+            const x = event.clientX - rect.left;
+            const y = event.clientY - rect.top;
+            let areasToCheck = clickableAreas; 
+            if (isModalVisible) { areasToCheck = modalClickableAreas; }
+            for (const area of areasToCheck) {
+                if (x >= area.x && x <= area.x + area.width && y >= area.y && y <= area.y + area.height) {
+                    if (area.action) { area.action(); return; }
+                }
+            }
+        });
+
+        // --- Initialization ---
+        mainDraw();
+        console.log("操，Zo's Canvas应用 (带角色选择版) 初始化完毕！");
+
+    </script>
+</body>
+</html>
